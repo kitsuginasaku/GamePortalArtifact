@@ -1,0 +1,133 @@
+# Deployment template: installed as .github/workflows/release-queue.yml in GamePortalArtifact.
+# Keep the whole workflow locked, including version reservation, both Mac architectures and publish.
+name: GamePortal release queue
+run-name: "${{ inputs.validate_only && 'Validate' || 'Release' }} ${{ inputs.source_sha }}"
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full GamePortal/main commit SHA
+        required: true
+        type: string
+      validate_only:
+        description: Build and verify all platforms without reserving or publishing a version
+        type: boolean
+        default: false
+concurrency:
+  group: gameportal-production-release
+  queue: max
+permissions:
+  contents: read
+jobs:
+  reserve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      skip: ${{ steps.reserve.outputs.skip }}
+      version: ${{ steps.reserve.outputs.version }}
+      release_id: ${{ steps.reserve.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: kitsuginasaku/GamePortal
+          ref: ${{ inputs.source_sha }}
+          ssh-key: ${{ secrets.GAMEPORTAL_SOURCE_READ_KEY }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - id: reserve
+        run: node src/app/scripts/queued-release.cjs reserve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          VALIDATE_ONLY: ${{ inputs.validate_only }}
+  build:
+    needs: reserve
+    if: needs.reserve.outputs.skip != 'true'
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            platform: win32
+            arch: x64
+          - os: macos-15
+            platform: darwin
+            arch: arm64
+          - os: macos-15-intel
+            platform: darwin
+            arch: x64
+    runs-on: ${{ matrix.os }}
+    env:
+      RELEASE_VERSION: ${{ needs.reserve.outputs.version }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: kitsuginasaku/GamePortal
+          ref: ${{ inputs.source_sha }}
+          ssh-key: ${{ secrets.GAMEPORTAL_SOURCE_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          architecture: ${{ matrix.arch }}
+      - name: Apply reserved version in isolated checkout
+        run: node src/app/scripts/queued-release.cjs version
+      - name: Build and verify Windows package
+        if: runner.os == 'Windows'
+        run: ./release-windows.ps1 -BuildOnly
+        shell: pwsh
+      - name: Build and verify Mac package
+        if: runner.os == 'macOS'
+        run: node release-mac.cjs --build-only
+      - name: Test release and updater logic
+        run: node --test tests/release-queue.test.cjs tests/updater.test.cjs tests/verify-package.test.cjs
+      - name: Record source and collect only distributable files
+        run: node src/app/scripts/collect-release.cjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.platform }}-${{ matrix.arch }}
+          path: release/queued-artifacts/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+          overwrite: true
+  publish:
+    needs: [reserve, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      RELEASE_VERSION: ${{ needs.reserve.outputs.version }}
+      RELEASE_ID: ${{ needs.reserve.outputs.release_id }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: kitsuginasaku/GamePortal
+          ref: ${{ inputs.source_sha }}
+          ssh-key: ${{ secrets.GAMEPORTAL_SOURCE_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: release/queued-artifacts
+          merge-multiple: true
+      - name: Verify all platforms and matching source
+        run: node src/app/scripts/queued-release.cjs verify release/queued-artifacts
+      - name: Publish complete draft
+        if: ${{ !inputs.validate_only }}
+        run: node src/app/scripts/queued-release.cjs publish release/queued-artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -1,0 +1,56 @@
+# Deploy as .github/workflows/release-recover.yml in GamePortalArtifact.
+name: Recover GamePortal release
+run-name: "Recover release from run ${{ inputs.run_id }}"
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Failed original release queue run ID (all builds must have succeeded)
+        type: string
+        required: true
+      tools_sha:
+        description: GamePortal commit containing the repaired publishing tools
+        type: string
+        required: true
+concurrency:
+  group: gameportal-production-release
+  queue: max
+permissions:
+  contents: write
+  actions: read
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RECOVERY_RUN_ID: ${{ inputs.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: kitsuginasaku/GamePortal
+          ref: ${{ inputs.tools_sha }}
+          ssh-key: ${{ secrets.GAMEPORTAL_SOURCE_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Validate recovery request and original reservation
+        id: reservation
+        run: node src/app/scripts/queued-release.cjs recover
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: kitsuginasaku/GamePortalArtifact
+          run-id: ${{ inputs.run_id }}
+          pattern: package-*
+          merge-multiple: true
+          path: release/queued-artifacts
+      - name: Verify original packages and finish publishing
+        run: node src/app/scripts/queued-release.cjs publish release/queued-artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.reservation.outputs.release_id }}
+          RELEASE_VERSION: ${{ steps.reservation.outputs.version }}
+          SOURCE_SHA: ${{ steps.reservation.outputs.source_sha }}

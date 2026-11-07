@@ -88,7 +88,7 @@ jobs:
         if: runner.os == 'macOS'
         run: node release-mac.cjs --build-only
       - name: Test release and updater logic
-        run: node --test tests/release-queue.test.cjs tests/updater.test.cjs tests/verify-package.test.cjs
+        run: node --test tests/release-queue.test.cjs tests/release-network.test.cjs tests/updater.test.cjs tests/verify-package.test.cjs
       - name: Record source and collect only distributable files
         run: node src/app/scripts/collect-release.cjs
       - uses: actions/upload-artifact@v4
